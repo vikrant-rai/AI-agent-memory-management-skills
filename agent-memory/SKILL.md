@@ -83,7 +83,101 @@ Write memories as **self-contained, third-person, specific** statements. Bad:
 "he liked option 2". Good: "For the scanner UI, user chose the dark
 precision-instrument aesthetic (option 2) over the light dashboard style."
 
-### 3. Context pressure thresholds — this is the core loop
+### 3. Before executing any incoming task — the pre-flight gate
+This is the fix for two failure modes: redoing already-completed work, and a
+big task landing when the window is already ~65% full and blowing out
+mid-execution. Run `precheck` BEFORE you start the task — it answers three
+questions in one call without interrupting your flow:
+
+```bash
+python3 scripts/memory.py precheck \
+  --task "refactor the auth module and add tests" \
+  --used 52000 --window 80000 --est-tokens 4000 --complex --session 2026-06-12-a
+```
+
+It returns JSON telling you:
+
+- **`already_completed`** — a matching task is in the done ledger. **SKIP it**
+  (confirm with the user first). This is what stops the agent re-running
+  finished work after a compaction wiped the verbatim history.
+- **`compact_first: true`** — projected usage (current + task estimate +
+  recall block) crosses the ceiling (default 80%). **Compact FIRST, start a
+  clean window with the recall block, THEN execute.** Because the completed
+  ledger and open tasks survive compaction, nothing gets repeated.
+- **`compact_first: false`** — fits; proceed normally.
+
+Pass `--complex` for multi-step work; it reserves 3× headroom so the task
+won't run out of room halfway. Tune `--est-tokens` to your typical task cost.
+
+**Where `--used` comes from (it's dynamic — sample it every turn):** you never
+hardcode it. After each model response, record the server's token counts once;
+then call `precheck` with NO `--used`/`--window` and it auto-reads the latest
+from `runtime.json`:
+
+```bash
+# Ollama: prompt_eval_count + eval_count from the response JSON
+python3 scripts/memory.py usage-update --prompt-tokens 48000 --completion-tokens 4000 --window 80000
+python3 scripts/memory.py precheck --task "..." --complex   # used/window auto-read
+```
+
+See `scripts/ollama_adapter.sh` for llama.cpp and OpenAI-compatible
+(vLLM/LM Studio) extraction. **gpt-oss is a reasoning model — its
+chain-of-thought tokens count against the window, so always use the server's
+reported counts (which include generated/reasoning tokens), never an estimate
+from visible text.**
+
+### Performance & the optional gate
+`precheck` is local-only — it never calls the model. Measured cost is ~38ms
+(mostly Python process startup), under 1% of a multi-second gpt-oss turn, so it
+will not slow your loop. You do **not** need to restrict it to high-usage turns
+for speed.
+
+That said, below the ceiling the check is a logical no-op (history is intact,
+nothing to compact, completed work is still visible in-context). If you prefer
+to skip it there, pass `--gate 0.70` and it early-exits with a fast PROCEED when
+usage is under 70%. **Complex tasks always run the full check — they bypass the
+gate** — because a large task slipping through is exactly what would push usage
+past the ceiling unchecked.
+
+**Why a quality-first ceiling (85%, not 95–100%).** Model output quality
+degrades as the context window fills ("lost in the middle" / context rot), often
+well before the window is physically full — frequently noticeable around
+65–70% on a mid-size window, and worse for retrieval-heavy or multi-step tasks.
+So the goal is not to maximize window *utilization*; it's to keep the working
+window in its high-quality zone. Running to 95–100% yields more tokens of
+*worse* output, which means errors and redone work — negative throughput.
+Recommended default: **`--gate 0.70 --ceiling 0.85`** on an 80K window. This
+keeps the working set mostly under the degradation zone, leaves a 12K-token
+overflow buffer, and (because compaction trigger points cluster within ~3K
+tokens regardless of ceiling) costs essentially no throughput versus running
+hotter. The exact degradation onset is model- and task-dependent — watch your
+own outputs; drop the ceiling to 0.80 if quality slips, raise toward 0.88 if you
+find compaction is firing too often and losing useful detail.
+
+
+- `--window 80000`, `--recall-budget 2000` (2.5% of window for the digest).
+- Ceiling 80% = **64K tokens**. With ~52K in use, a complex task
+  (`est 4000 × 3 = 12K` + 2K recall) projects to 66K → **COMPACT FIRST** — the
+  exact "task at 65%" case that used to redo work.
+- A bigger window would not fix re-execution; only the ledger does. Even at
+  gpt-oss's full 131K you'd want this gate, because verbose reasoning degrades
+  "lost in the middle" well before the window is physically full.
+
+**Track tasks as first-class objects so the ledger stays accurate:**
+
+```bash
+python3 scripts/memory.py task-add "Refactor auth module" --session 2026-06-12-a
+python3 scripts/memory.py task-set 7 doing      # when you start
+python3 scripts/memory.py task-set 7 done       # when finished
+python3 scripts/memory.py task-list --session 2026-06-12-a --state done
+```
+
+Completed and open tasks appear in every `recall` block (scope with
+`--session`) under **"Completed this session — DO NOT REDO"** and **"Open
+tasks"**, and are never trimmed by the token budget — so even after compaction
+the agent always knows what's done and what's still open.
+
+### 4. Context pressure thresholds — the compaction loop
 Monitor context usage. Act at these thresholds:
 
 - **~50% — checkpoint.** Summarize everything settled so far into one episode,
@@ -108,7 +202,7 @@ Monitor context usage. Act at these thresholds:
     --session "2026-06-12-a"
   ```
 
-### 4. Session end
+### 5. Session end
 Always flush before the session closes: one `compact` with a summary of what
 happened and `--thread` flags for anything unfinished. Close threads that got
 resolved:
