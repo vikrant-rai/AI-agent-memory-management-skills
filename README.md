@@ -1,7 +1,7 @@
 # AI-agent-memory-management-skills
 Memory Skill — SQLite FTS5 persistent memory for multi-session AI agents. Features decay scoring, thread tracking, session checkpointing, and auto-prune. Includes SKILL.md (behavioral spec), memory.py (zero-dependency engine), and architecture notes with Ollama + MemOS upgrade paths.
 
-Important Disclaimer:
+# Important Disclaimer:
 
 Memory Skill — SQLite FTS5 persistent memory for multi-session AI agents. Features decay scoring, thread tracking, session checkpointing, and auto-prune. Includes SKILL.md (behavioral spec), memory.py (zero-dependency engine), and architecture notes with Ollama + MemOS upgrade paths.
 

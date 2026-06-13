@@ -82,4 +82,7 @@ upgrade path.
 
 ## License
 
-MIT
+MIT © 2026 
+[vikrant-rai](https://x.com/vikrai101) · 
+X [@vikrai101](https://x.com/vikrai101)
+LinkedIn: https://www.linkedin.com/in/vikrantr1
